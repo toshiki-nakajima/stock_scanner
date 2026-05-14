@@ -86,19 +86,26 @@ def volume_bonus(vol_ratio: float) -> int:
     if vol_ratio >= 3.0: return 5
     return 0
 
-def calc_score(signals: list, vol_ratio: float) -> tuple:
-    """シグナルと出来高比率からスコアと内訳を返す"""
+def calc_score(signals: list, vol_ratio: float, chg: float, ma75_adj: int) -> tuple:
+    """シグナルと出来高比率・当日変化率・MA75調整値からスコアと内訳を返す。
+    - BB下抜けは売りシグナルのためスコア加点の対象外
+    - 出来高急増は当日価格が上昇している時のみ加点（下落時は表示のみ）
+    - BB上抜け(25日)かつMA75未満 → +10pt、MA75超 → -5pt
+    """
     bd = {k: 0 for k in SCORE_WEIGHTS}
     bd["volume_bonus"] = 0
+    bd["ma75_adj"]     = 0
 
     for sig in signals:
-        if sig in ("BB上抜け", "BB下抜け"):
+        if sig == "BB上抜け":                  # BB下抜けは加点しない
             bd["bb_breakout"]  = SCORE_WEIGHTS["bb_breakout"]
+            bd["ma75_adj"]     = ma75_adj      # BB上抜け時のみMA75調整を適用
         elif sig == "バンド収縮":
             bd["band_squeeze"] = SCORE_WEIGHTS["band_squeeze"]
         elif sig == "出来高急増":
-            bd["volume_surge"] = SCORE_WEIGHTS["volume_surge"]
-            bd["volume_bonus"] = volume_bonus(vol_ratio)
+            if chg > 0:                        # 上昇時のみ加点
+                bd["volume_surge"] = SCORE_WEIGHTS["volume_surge"]
+                bd["volume_bonus"] = volume_bonus(vol_ratio)
         elif sig in ("ゴールデンC", "デッドC"):
             bd["ma_cross"]     = SCORE_WEIGHTS["ma_cross"]
 
@@ -112,27 +119,34 @@ def score_rank(score: int) -> str:
 
 # ── テクニカル計算 ────────────────────────────────────────────────────────────
 
-def compute(ticker: str) -> dict | None:
+def compute(ticker: str) -> "dict | None":
     try:
-        df = yf.download(ticker, period="6mo", interval="1d", progress=False, auto_adjust=True)
+        t_obj = yf.Ticker(ticker)
+        df = t_obj.history(period="6mo", interval="1d", auto_adjust=True)
         if df is None or len(df) < 30:
             return None
 
+        # 銘柄名取得（取得失敗時はtickerをそのまま使用）
+        try:
+            info = t_obj.info
+            name = info.get("longName") or info.get("shortName") or ticker
+        except Exception:
+            name = ticker
+
         close  = df["Close"].squeeze().dropna()
         volume = df["Volume"].squeeze().dropna()
-        if len(close) < 30:
-            return None
 
-        # Bollinger Bands（20日・2σ）
-        ma20  = close.rolling(20).mean()
-        std20 = close.rolling(20).std()
-        bb_u  = ma20 + 2 * std20
-        bb_l  = ma20 - 2 * std20
-        bw    = (bb_u - bb_l) / ma20 * 100
+        # Bollinger Bands（25日・2σ）
+        ma25b = close.rolling(25).mean()
+        std25 = close.rolling(25).std()
+        bb_u  = ma25b + 2 * std25
+        bb_l  = ma25b - 2 * std25
+        bw    = (bb_u - bb_l) / ma25b * 100
 
         # 移動平均
         ma5  = close.rolling(5).mean()
         ma25 = close.rolling(25).mean()
+        ma75 = close.rolling(75).mean()
 
         # 出来高
         vol_ma20 = volume.rolling(20).mean()
@@ -140,12 +154,19 @@ def compute(ticker: str) -> dict | None:
         p         = float(close.iloc[-1])
         bbu       = float(bb_u.iloc[-1])
         bbl       = float(bb_l.iloc[-1])
-        bbm       = float(ma20.iloc[-1])
+        bbm       = float(ma25b.iloc[-1])
         bw_val    = float(bw.iloc[-1])
         ma5_v     = float(ma5.iloc[-1])
         ma25_v    = float(ma25.iloc[-1])
+        ma75_v    = float(ma75.iloc[-1]) if len(close) >= 75 else None
         vol_ratio = float(volume.iloc[-1]) / float(vol_ma20.iloc[-1]) if float(vol_ma20.iloc[-1]) > 0 else 0
         chg       = float((close.iloc[-1] - close.iloc[-2]) / close.iloc[-2] * 100)
+
+        # MA75調整値（BB上抜け時のみ適用）
+        if ma75_v is not None:
+            ma75_adj = +10 if p < ma75_v else -5
+        else:
+            ma75_adj = 0
 
         # シグナル判定
         signals = []
@@ -165,28 +186,31 @@ def compute(ticker: str) -> dict | None:
             except Exception:
                 pass
 
-        score, bd = calc_score(signals, vol_ratio)
+        score, bd = calc_score(signals, vol_ratio, chg, ma75_adj)
 
         return {
-            "score":     score,
-            "rank":      score_rank(score),
-            "ticker":    ticker,
-            "price":     round(p, 2),
-            "change%":   round(chg, 2),
-            "signals":   ", ".join(signals) if signals else "",
+            "score":      score,
+            "rank":       score_rank(score),
+            "ticker":     ticker,
+            "name":       name,
+            "price":      round(p, 2),
+            "change%":    round(chg, 2),
+            "signals":    ", ".join(signals) if signals else "",
             # スコア内訳
-            "pt_BB":     bd["bb_breakout"],
-            "pt_出来高": bd["volume_surge"] + bd["volume_bonus"],
-            "pt_収縮":   bd["band_squeeze"],
-            "pt_MA":     bd["ma_cross"],
+            "pt_BB":      bd["bb_breakout"],
+            "pt_出来高":  bd["volume_surge"] + bd["volume_bonus"],
+            "pt_収縮":    bd["band_squeeze"],
+            "pt_MA":      bd["ma_cross"],
+            "pt_MA75補正": bd["ma75_adj"],
             # テクニカル値
-            "BB上限":    round(bbu, 2),
-            "BB中央":    round(bbm, 2),
-            "BB下限":    round(bbl, 2),
-            "BW%":       round(bw_val, 2),
-            "MA5":       round(ma5_v, 2),
-            "MA25":      round(ma25_v, 2),
-            "出来高比":  round(vol_ratio, 2),
+            "BB上限":     round(bbu, 2),
+            "BB中央":     round(bbm, 2),
+            "BB下限":     round(bbl, 2),
+            "BW%":        round(bw_val, 2),
+            "MA5":        round(ma5_v, 2),
+            "MA25":       round(ma25_v, 2),
+            "MA75":       round(ma75_v, 2) if ma75_v is not None else None,
+            "出来高比":   round(vol_ratio, 2),
         }
     except Exception:
         return None
@@ -226,6 +250,7 @@ def main():
             print(
                 f"  {r['price']:>10,.2f}  {r['change%']:>+6.2f}%"
                 f"  score={r['score']:>3}  {r['rank']}  {r['signals'] or '—'}"
+                f"  ({r['name']})"
             )
         else:
             print("  (取得失敗)")
@@ -255,11 +280,11 @@ def main():
     if not sig_df.empty:
         top = sig_df.sort_values("score", ascending=False).head(20)
         print("【スコアランキング TOP20】\n")
-        print(f"  {'#':<4} {'ticker':<12} {'score':>5}  {'rank'}  {'price':>10}  {'chg%':>7}  signals")
-        print(f"  {'-'*72}")
+        print(f"  {'#':<4} {'ticker':<12} {'name':<30} {'score':>5}  {'rank'}  {'price':>10}  {'chg%':>7}  signals")
+        print(f"  {'-'*90}")
         for n, (_, r) in enumerate(top.iterrows(), 1):
             print(
-                f"  {n:<4} {r['ticker']:<12} {r['score']:>5}  {r['rank']}  "
+                f"  {n:<4} {r['ticker']:<12} {r['name'][:28]:<30} {r['score']:>5}  {r['rank']}  "
                 f"{r['price']:>10,.2f}  {r['change%']:>+7.2f}%  {r['signals']}"
             )
         print()
