@@ -223,7 +223,7 @@ def main():
     parser.add_argument("--tickers",     nargs="+", help="個別ティッカー指定（スペース区切り）")
     parser.add_argument("--min-score",   type=int, default=1, help="出力するスコアの下限（デフォルト: 1）")
     parser.add_argument("--all-results", action="store_true", help="スコア0銘柄も含めて全件出力")
-    parser.add_argument("--out",         default="scan_result.csv", help="出力CSVファイル名")
+    parser.add_argument("--out", default=None, help="出力CSVファイル名（デフォルト: scan_result_YYYYMMDD_HHMM.csv）")
     args = parser.parse_args()
 
     if args.tickers:
@@ -234,6 +234,8 @@ def main():
         tickers, label = SP500_SAMPLE, "S&P500"
     else:
         tickers, label = NIKKEI225 + SP500_SAMPLE, "日経225 + S&P500"
+
+    out_filename = args.out or f"scan_result_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
 
     print(f"\n{'='*62}")
     print(f"  SIGNAL SCANNER  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
@@ -263,7 +265,7 @@ def main():
 
     out_df = df if args.all_results else df[df["score"] >= args.min_score]
     out_df = out_df.sort_values("score", ascending=False)
-    out_df.to_csv(args.out, index=False, encoding="utf-8-sig")
+    out_df.to_csv(out_filename, index=False, encoding="utf-8-sig")
 
     # サマリー
     sig_df = df[df["score"] > 0]
@@ -274,7 +276,7 @@ def main():
     print(f"  ★★★  80点以上  : {len(df[df['score'] >= 80])} 件")
     print(f"  ★★☆  50〜79点  : {len(df[(df['score'] >= 50) & (df['score'] < 80)])} 件")
     print(f"  ★☆☆  20〜49点  : {len(df[(df['score'] >= 20) & (df['score'] < 50)])} 件")
-    print(f"  出力ファイル       : {args.out}")
+    print(f"  出力ファイル       : {out_filename}")
     print(f"{'='*62}\n")
 
     if not sig_df.empty:
